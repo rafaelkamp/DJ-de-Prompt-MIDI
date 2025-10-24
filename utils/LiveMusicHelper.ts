@@ -29,6 +29,15 @@ export class LiveMusicHelper extends EventTarget {
 
   private prompts: Map<string, Prompt>;
 
+  private mediaRecorder: MediaRecorder | null = null;
+  private recordedChunks: Blob[] = [];
+  private readonly streamDestination: MediaStreamAudioDestinationNode;
+
+  private eqLow: BiquadFilterNode;
+  private eqMid: BiquadFilterNode;
+  private eqHigh: BiquadFilterNode;
+  private masterVolumeNode: GainNode;
+
   constructor(ai: GoogleGenAI, model: string) {
     super();
     this.ai = ai;
@@ -36,6 +45,34 @@ export class LiveMusicHelper extends EventTarget {
     this.prompts = new Map();
     this.audioContext = new AudioContext({ sampleRate: 48000 });
     this.outputNode = this.audioContext.createGain();
+    this.streamDestination = this.audioContext.createMediaStreamDestination();
+
+    // EQ nodes
+    this.eqLow = this.audioContext.createBiquadFilter();
+    this.eqLow.type = 'lowshelf';
+    this.eqLow.frequency.value = 320;
+    this.eqLow.gain.value = 0;
+
+    this.eqMid = this.audioContext.createBiquadFilter();
+    this.eqMid.type = 'peaking';
+    this.eqMid.frequency.value = 1000;
+    this.eqMid.Q.value = 1;
+    this.eqMid.gain.value = 0;
+
+    this.eqHigh = this.audioContext.createBiquadFilter();
+    this.eqHigh.type = 'highshelf';
+    this.eqHigh.frequency.value = 3200;
+    this.eqHigh.gain.value = 0;
+
+    // Master volume
+    this.masterVolumeNode = this.audioContext.createGain();
+    this.masterVolumeNode.gain.value = 1;
+
+    // Connect audio graph
+    this.outputNode.connect(this.eqLow);
+    this.eqLow.connect(this.eqMid);
+    this.eqMid.connect(this.eqHigh);
+    this.eqHigh.connect(this.masterVolumeNode);
   }
 
   private getSession(): Promise<LiveMusicSession> {
@@ -138,14 +175,38 @@ export class LiveMusicHelper extends EventTarget {
     }
   }, 200);
 
+  public readonly setPitchBend = throttle(async (value: number) => {
+    if (!this.session || this.playbackState === 'stopped' || this.playbackState === 'paused') return;
+
+    try {
+      // @ts-ignore - sendControlChanges is not in the public types yet
+      await this.session.sendControlChanges({
+        pitchBend: value,
+      });
+    } catch (e: any) {
+      this.dispatchEvent(new CustomEvent('error', { detail: e.message }));
+    }
+  }, 50);
+
+  public setEqGains({ low, mid, high }: { low: number, mid: number, high: number }) {
+    this.eqLow.gain.setValueAtTime(low, this.audioContext.currentTime);
+    this.eqMid.gain.setValueAtTime(mid, this.audioContext.currentTime);
+    this.eqHigh.gain.setValueAtTime(high, this.audioContext.currentTime);
+  }
+
+  public setMasterVolume(level: number) {
+    this.masterVolumeNode.gain.setValueAtTime(level, this.audioContext.currentTime);
+  }
+
   public async play() {
     this.setPlaybackState('loading');
     this.session = await this.getSession();
     await this.setWeightedPrompts(this.prompts);
     this.audioContext.resume();
     this.session.play();
-    this.outputNode.connect(this.audioContext.destination);
-    if (this.extraDestination) this.outputNode.connect(this.extraDestination);
+    this.masterVolumeNode.connect(this.audioContext.destination);
+    if (this.extraDestination) this.masterVolumeNode.connect(this.extraDestination);
+    this.masterVolumeNode.connect(this.streamDestination);
     this.outputNode.gain.setValueAtTime(0, this.audioContext.currentTime);
     this.outputNode.gain.linearRampToValueAtTime(1, this.audioContext.currentTime + 0.1);
   }
@@ -157,13 +218,14 @@ export class LiveMusicHelper extends EventTarget {
     this.outputNode.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + 0.1);
     this.nextStartTime = 0;
     this.outputNode = this.audioContext.createGain();
+    this.outputNode.connect(this.eqLow);
   }
 
   public stop() {
     if (this.session) this.session.stop();
     this.setPlaybackState('stopped');
-    this.outputNode.gain.setValueAtTime(0, this.audioContext.currentTime);
-    this.outputNode.gain.linearRampToValueAtTime(1, this.audioContext.currentTime + 0.1);
+    this.outputNode.gain.setValueAtTime(this.outputNode.gain.value, this.audioContext.currentTime);
+    this.outputNode.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + 0.1);
     this.nextStartTime = 0;
     this.session = null;
     this.sessionPromise = null;
@@ -178,6 +240,41 @@ export class LiveMusicHelper extends EventTarget {
         return this.play();
       case 'loading':
         return this.stop();
+    }
+  }
+
+  public startRecording() {
+    if (this.mediaRecorder?.state === 'recording') {
+      console.warn('Recording is already in progress.');
+      return;
+    }
+
+    const options = { mimeType: 'audio/webm;codecs=opus' };
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        this.dispatchEvent(new CustomEvent('error', { detail: 'Formato de gravação webm/opus não suportado.' }));
+        return;
+    }
+    
+    this.mediaRecorder = new MediaRecorder(this.streamDestination.stream, options);
+    this.recordedChunks = [];
+
+    this.mediaRecorder.ondataavailable = (event: BlobEvent) => {
+      if (event.data.size > 0) {
+        this.recordedChunks.push(event.data);
+      }
+    };
+
+    this.mediaRecorder.onstop = () => {
+      const blob = new Blob(this.recordedChunks, { type: options.mimeType });
+      this.dispatchEvent(new CustomEvent<Blob>('recording-finished', { detail: blob }));
+    };
+    
+    this.mediaRecorder.start();
+  }
+
+  public stopRecording() {
+    if (this.mediaRecorder?.state === 'recording') {
+      this.mediaRecorder.stop();
     }
   }
 

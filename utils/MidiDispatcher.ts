@@ -47,13 +47,20 @@ export class MidiDispatcher extends EventTarget {
         const channel = statusByte & 0x0f;
         const messageType = statusByte & 0xf0;
 
-        const isControlChange = messageType === 0xb0;
-        if (!isControlChange) return;
-
-        const detail: ControlChange = { cc: data[1], value: data[2], channel };
-        this.dispatchEvent(
-          new CustomEvent<ControlChange>('cc-message', { detail }),
-        );
+        if (messageType === 0xb0) { // Control Change
+          const detail: ControlChange = { cc: data[1], value: data[2], channel };
+          this.dispatchEvent(
+            new CustomEvent<ControlChange>('cc-message', { detail }),
+          );
+        } else if (messageType === 0xe0) { // Pitch Bend
+          const lsb = data[1];
+          const msb = data[2];
+          const rawValue = (msb << 7) | lsb; // 14-bit value (0-16383)
+          const normalizedValue = (rawValue - 8192) / 8192; // map to -1.0 to 1.0
+          this.dispatchEvent(
+            new CustomEvent<number>('pitch-bend-message', { detail: normalizedValue }),
+          );
+        }
       };
     }
 

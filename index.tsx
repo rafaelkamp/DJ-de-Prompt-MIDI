@@ -11,7 +11,8 @@ import { ToastMessage } from './components/ToastMessage';
 import { LiveMusicHelper } from './utils/LiveMusicHelper';
 import { AudioAnalyser } from './utils/AudioAnalyser';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY, apiVersion: 'v1alpha' });
+// FIX: Use `process.env.API_KEY` and remove `apiVersion` to align with the SDK guidelines.
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const model = 'lyria-realtime-exp';
 
 function main() {
@@ -68,6 +69,36 @@ function main() {
     pdjMidi.audioLevel = level;
   }));
 
+  pdjMidi.addEventListener('start-recording', () => {
+    liveMusicHelper.startRecording();
+  });
+
+  pdjMidi.addEventListener('stop-recording', () => {
+    liveMusicHelper.stopRecording();
+  });
+
+  liveMusicHelper.addEventListener('recording-finished', ((e: Event) => {
+    const customEvent = e as CustomEvent<Blob>;
+    const blob = customEvent.detail;
+    if (blob.size > 0) {
+      pdjMidi.recordingUrl = URL.createObjectURL(blob);
+    }
+  }));
+
+  pdjMidi.addEventListener('pitch-bend-changed', ((e: Event) => {
+    const customEvent = e as CustomEvent<number>;
+    liveMusicHelper.setPitchBend(customEvent.detail);
+  }));
+
+  pdjMidi.addEventListener('eq-settings-changed', (e: Event) => {
+    const customEvent = e as CustomEvent<{low: number, mid: number, high: number}>;
+    liveMusicHelper.setEqGains(customEvent.detail);
+  });
+
+  pdjMidi.addEventListener('master-volume-changed', (e: Event) => {
+    const customEvent = e as CustomEvent<number>;
+    liveMusicHelper.setMasterVolume(customEvent.detail);
+  });
 }
 
 function buildInitialPrompts() {
@@ -111,6 +142,7 @@ const DEFAULT_PROMPTS = [
   { color: '#d8ff3e', text: 'Neo Soul' },
   { color: '#5200ff', text: 'Trip Hop' },
   { color: '#d9b2ff', text: 'Thrash' },
+  
 ];
 
 main();
